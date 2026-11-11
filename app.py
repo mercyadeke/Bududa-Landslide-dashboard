@@ -142,12 +142,37 @@ BOUNDS = [[lat_s, lon_w], [lat_n, lon_e]]
 # --------------------------------------------------------------------------- sidebar
 st.sidebar.title("Controls")
 
-st.sidebar.subheader("1 · Rainfall scenario")
-r30 = st.sidebar.slider("Rain in the past 30 days (mm)", 0, 450, 150, 5,
+st.sidebar.subheader("1 · Rainfall")
+mode = st.sidebar.radio("Mode", ["What-if scenario", "Replay a past date"], horizontal=True,
+                        help="Replay fills the sliders with the real CHIRPS rainfall for that day.")
+replay = None
+if mode == "Replay a past date":
+    ls_dates = rain.loc[rain.landslide == 1, "date"].dt.date.tolist()
+    pick = st.sidebar.selectbox("Quick pick: landslide days",
+                                ["(choose any date below)"] + [d.isoformat() for d in ls_dates])
+    rd = st.sidebar.date_input("Date", value=(pd.to_datetime(pick).date() if pick[0].isdigit()
+                                              else pd.Timestamp("2010-03-01").date()),
+                               min_value=pd.Timestamp("2010-01-30").date(),
+                               max_value=rain.date.max().date())
+    row = rain[rain.date.dt.date == rd]
+    if len(row):
+        row = row.iloc[0]
+        replay = {"date": rd, "r30": int(round(row.rain_30d)), "r3": int(round(row.rain_3d)),
+                  "landslide": bool(row.landslide)}
+
+r30 = st.sidebar.slider("Rain in the past 30 days (mm)", 0, 450,
+                        replay["r30"] if replay else 150, 1, disabled=replay is not None,
                         help="Soil saturation. Landslide days 2010–2024: 113–281 mm.")
-r3 = st.sidebar.slider("Rain in the past 3 days (mm)", 0, 120, 20, 1,
+r3 = st.sidebar.slider("Rain in the past 3 days (mm)", 0, 120,
+                       min(replay["r3"], 120) if replay else 20, 1, disabled=replay is not None,
                        help="Recent burst. Landslide days 2010–2024: 12–44 mm.")
+if replay:
+    r30, r3 = replay["r30"], replay["r3"]
 alert = L.alert_level(r30, r3)
+if replay:
+    st.sidebar.caption(f"Actual rain on {replay['date']:%d %b %Y}: {r30} mm (30 days), {r3} mm (3 days)"
+                       f" → **{alert}**. Landslide recorded that day: "
+                       f"**{'YES' if replay['landslide'] else 'no'}**.")
 
 st.sidebar.subheader("2 · Who to warn")
 cutoff_label = st.sidebar.selectbox(
@@ -219,7 +244,9 @@ flag_txt = ("No zones flagged" if not min_class
 k = st.columns(5)
 kpi(k[0], "Alert level", alert,
     f"Watch ≥{L.WATCH['r30']:.0f} mm/30d & ≥{L.WATCH['r3']:.0f} mm/3d", ALERT_COLORS[alert])
-kpi(k[1], "Rainfall scenario", f"{r30} mm", f"30 days · {r3} mm in last 3 days")
+kpi(k[1], f"Rainfall · replay {replay['date']:%d %b %Y}" if replay else "Rainfall scenario",
+    f"{r30} mm", f"30 days · {r3} mm in last 3 days"
+    + (f" · landslide that day: {'YES' if replay['landslide'] else 'no'}" if replay else ""))
 kpi(k[2], "People to warn", f"{people_flag:,.0f}", f"{flag_txt} · of {people_total:,.0f}")
 kpi(k[3], "Land flagged", f"{area_flag_pct:.0f}%", "Share of district area")
 if buildings is not None and "bld_at_risk" in buildings:
@@ -260,7 +287,7 @@ map_col, side_col = st.columns([2.2, 1])
 with map_col:
     st.markdown("#### Landslide susceptibility map")
     centre = [(lat_s + lat_n) / 2, (lon_w + lon_e) / 2]
-    m = folium.Map(location=centre, zoom_start=12, tiles="CartoDB positron", control_scale=True)
+    m = folium.Map(location=centre, zoom_start=12, tiles="OpenStreetMap", control_scale=True)
     folium.TileLayer("Esri.WorldImagery", name="Satellite").add_to(m)
     folium.raster_layers.ImageOverlay(class_png(cls), bounds=BOUNDS, name="Susceptibility (5 classes)",
                                       opacity=0.85).add_to(m)
@@ -297,12 +324,13 @@ with map_col:
         s = look.loc[sel_sub]
         bc = (s.lat, s.lon)
     else:
-        bc = tuple(centre)
+        dc = subs.geometry.union_all().representative_point()   # a point inside Bududa
+        bc = (dc.y, dc.x)
     folium.Circle(bc, radius=buffer_m, color=AMBER, weight=2, fill=True, fill_opacity=0.1,
                   tooltip=f"Buffer {buffer_m} m").add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
-    out = st_folium(m, height=560, use_container_width=True, returned_objects=["last_clicked"])
+    out = st_folium(m, height=560, width=None, returned_objects=["last_clicked"])
     if out and out.get("last_clicked") and out["last_clicked"] != st.session_state.get("click"):
         st.session_state["click"] = out["last_clicked"]
         st.rerun()
@@ -341,11 +369,11 @@ with side_col:
     elif len(expo):
         top = expo.head(12).iloc[::-1]
         fig = px.bar(top, x="people_flagged", y="subcounty", orientation="h",
-                     color_discrete_sequence=[AMBER],
+                     color_discrete_sequence=["#3B82F6"],
                      labels={"people_flagged": "People in flagged zones", "subcounty": ""})
         fig.update_layout(height=420, margin=dict(l=0, r=10, t=10, b=0),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # --------------------------------------------------------------------------- bottom row
@@ -371,7 +399,7 @@ with b1:
                       xaxis_title="Rain in previous 30 days (mm)", yaxis_title="Rain in previous 3 days (mm)",
                       legend=dict(orientation="h", y=1.08), paper_bgcolor="rgba(0,0,0,0)",
                       plot_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     hist = r.alert.astype(str).str.upper().value_counts(normalize=True) \
         .reindex(["NORMAL", "WATCH", "WARNING"]).fillna(0) * 100
     st.caption(f"Rule applied to 2010–2024: Watch on {hist['WATCH']:.0f}% of days, Warning on "
@@ -391,10 +419,10 @@ with b2:
     fig.update_yaxes(visible=False)
     fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0), xaxis_title="",
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.dataframe(ev[["date", "subcounty", "deaths_reported"]].rename(
         columns={"date": "Date", "subcounty": "Sub-county", "deaths_reported": "Deaths reported"}),
-        hide_index=True, use_container_width=True, height=180)
+        hide_index=True, width="stretch", height=180)
 
 
 # --------------------------------------------------------------------------- sources
